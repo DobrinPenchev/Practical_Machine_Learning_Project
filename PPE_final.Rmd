@@ -1,0 +1,169 @@
+---
+title: "Predicting Physical Exercise - Mistakes Detection"
+author: "Dobrin Penchev"
+date: "Monday, April 20, 2015"
+output: html_document
+---
+
+## Executive Summary
+
+The main goal of this project is to select a suitable machine learning algorithm and subsequently train that on a sample data set so that it can successfully predict a categorical variable describing a manner into which a physical weight lifting exercise has been accomplished by six different participants. For more information on the original experiment, please, refer to the paper available at the following link: http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201
+
+## Selection of Model and Starting Set of Predictors
+
+The current approach recognizes the fact that not all variables in the sample data set are probably relevant to the manner which the exercise has been completed. Initially, the full sample data set is loaded. Afterwards, it is stripped off any aggregate statistics (e.g. **average, standard deviation, variance, minimum, maximum, kurtosis, skewness**) as well as any temporal or qualitative characteristics which should not have any influence on the manner which the weight lifting exercise has been accomplished. The only two categorical variables preserved are participant (**user_name**) and manner of execution (**classe**) for the reason of performing initial exploratory data stratification and analysis.
+
+The rationale behind elimination of the aggregate statistics is that they represent some deterministic transformations of the raw exercise execution data and as such probably would not add explanatory power to the classification exercise. Thus, the number of potential predictors is trimmed down to 52 plus the two categorical variables (user and classe).
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+
+require(caret)
+require(ggplot2)
+require(grid)
+require(gridExtra)
+require(randomForest)
+require(doParallel)
+require(foreach)
+require(pROC)
+
+# loading data and trimming predictors
+data.set <- read.csv("pml-training.csv")
+exercise.data <- data.set[,-c(grep("^min|^max|^avg|^amplitude|^stddev|^kurtosis|^skewness|^var|^raw|^cvtd|^X|window$",
+                colnames(data.set)))]
+```
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE,include=FALSE}
+
+str(exercise.data)
+summary(exercise.data)
+```
+
+Since the problem of interest involves classification of qualitative outcomes (manner of exercise execution) based on some quantitative characteristics (sensor data), the selection of machine learning algorithm is accomplished among the family of classification and regression (**CART**) trees. Various models are available for implementation of the solution via the **train** package in R. Among those **rpart**,  **adabag** and **randomForest** model families offer various approaches. 
+
+Random forests method has been selected due to its popularity and high accuracy as a model. Further, initial exploratory data analysis shows that in particular sensor measurement related data is quite noisy. The number of trees grown per forest has been set to 500.
+
+The major drawbacks of that method are speed of computation, over-fitting of the model and interpretability of the model. Given that the task at stake in the project is mistake recognition from sensor data, the interpretability of the results is not of particular concern.
+
+Over-fitting of the model is addressed by using a large sample of data (close to **19,600 samples**) where the **60/40** split between **train** and **test** data sets is relatively conservative so that the model accuracy statistics produced on the test data set are representative for out-of-sample performance of the model provided that it needs to distinguish among different exercise execution manners performed by the same six participants in the experiment. Additionally, to allow for more robust fit (i.e. avoid over-fitting) a 10-fold 3-time repeated cross validation is performed on the training data set. Given that there are 52 potential predictors in total, the 11,700 sample training data set allows for about 230 samples per predictor variable.
+
+The speed challenge for this project is addressed via using the parallel random forests model implementation for the train package as well as making use of a cluster of 7 CPU cores which brings execution time for the model training down to 8 minutes.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+# splitting the data into training and test sets
+set.seed(134)
+partition.index <- createDataPartition(exercise.data$classe, p = 0.6, list = FALSE)
+train.data <- exercise.data[partition.index,]
+test.data <- exercise.data[-partition.index,]
+```
+## Exploratory Data Analysis
+
+As a first step the predictors in the training data set are checked for near zero variance. None of the 52 predictors has been identified as a near zero variance predictor.
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+# near zero variance check for the predictors
+train.nzv <- nearZeroVar(train.data,saveMetrics = TRUE)
+```
+As a second step exploratory data analysis is performed on the training data set. It has been stratified by manner of weight lifting exercise execution as well as by experiment participant. The purpose is to get some initial idea of the data and any peculiarities if existent.
+
+The following plots have been produced:
+
+1. Data stratification by **Exercise Execution Manner and Participant** for select **Euler Angles and Devices:**
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10.7, fig.height=4.9}
+
+pitch.belt <- ggplot(train.data, aes(classe, pitch_belt)) + geom_jitter(aes(colour = user_name),size=1)
+pitch.belt <- pitch.belt + xlab("Exercise Execution Manner") + ylab("Angle - Device : Pitch - Belt")
+yaw.belt <- ggplot(train.data, aes(classe, yaw_belt)) + geom_jitter(aes(colour = user_name),size=1)
+yaw.belt <- yaw.belt + xlab("Exercise Execution Manner") + ylab("Angle - Device : Yaw - Belt")
+
+grid.arrange(pitch.belt, yaw.belt, ncol=2)
+```
+
+It is interesting to note the difference in the data for the various combinations of Angle - Device Placement by participant in the experiment. I believe that this difference may eventually reflect on the accuracy (predictive power) of the classifier (trained on data from the initial six participants in the experiment) for a new subject. Similar plots for other combinations of Angle - Device Placement support the observation above, however, the data is noisier by exercise participant. The current project is not concerned with that since its goal is to classify the exercise execution manner for new samples produced by the same experiment participants.
+
+2. Data stratification by **Exercise Execution Manner and Participant** for select **Sensor Measurements:**
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10.7, fig.height=4.9}
+
+accel.arm.x <- ggplot(train.data, aes(classe, accel_arm_x)) + geom_jitter(aes(colour = user_name),size=1)
+accel.arm.x <- accel.arm.x + xlab("Exercise Execution Manner") + ylab("Acceleration - Arm - X")
+accel.dumbbell.y <- ggplot(train.data, aes(classe, accel_dumbbell_y)) + geom_jitter(aes(colour = user_name), size=1)
+accel.dumbbell.y <- accel.dumbbell.y + xlab("Exercise Execution Manner") + ylab("Acceleration - Dumbbell - Y")
+
+grid.arrange(accel.arm.x, accel.dumbbell.y, ncol=2)
+```
+
+The data from the sensor measurements is also noisy although certain differentiation can be discerned by participant with the degree of differentiation varying by combination of device placement (arm/forearm/belt/dumbbell), measurement type (acceleration/gyroscope/magnetometer) and axis (x/y/z).
+
+## Algorithm Training and Results
+
+Random forests algorithm has been trained on the train data set only. The raw model output follows:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, comment=NA, include=FALSE}
+
+# set up of a computational cluster
+cluster <- makePSOCKcluster(7)
+clusterEvalQ(cluster, library(foreach))
+registerDoParallel(cluster,cores=7)
+
+# setting seeds for the cluster cores so that the results can be fully reproducible
+set.seed(170)
+my.seeds <- vector(mode="list", length = 31)
+for (i in 1:30) my.seeds[[i]] <- sample.int(n=10000,52)
+my.seeds[[31]] <- sample.int(n=10000,1)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, comment=NA}
+# setting train function parameters for parallel computing, seeds, and 
+# 10-fold cross sectional validation with resampling to avoid overfitting of the model
+trCtrl <- trainControl(method="repeatedcv", number = 10, repeats = 3, seeds = my.seeds, allowParallel = TRUE)
+
+# fittng of the parallel random forests algorithm to the training data set
+set.seed(17)
+parRF.fit <- train(train.data[,2:53], train.data$classe, method="parRF", trControl = trCtrl)
+
+# closeAllConnections()
+
+parRF.fit
+```
+
+The expected out of sample error rate of the model after applying cross validation is about 1% (1 - accuracy). The model selection of predictors is based on maximization of the accuracy statistic. 27 predictors have been selected for the final model.
+
+The final model has been run once on the test set to compute an out-of-sample accuracy statistics and confusion matrix.
+The results from the matrix are printed below:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, comment=NA}
+
+# executing predictions on the test data set and computing accuracy statistics
+parRF.fit.test <- predict(parRF.fit,test.data[,2:53])
+parRF.fit.conf.mtrx <- confusionMatrix(parRF.fit.test,test.data$classe)
+parRF.fit.conf.mtrx
+```
+It is comforting to observe that the model error rate computed on the test data set is similar to the expected error rate obtained on the train data set. The prediction accuracy is high across all manners of exercise execution (as presented by the different class letters - A, B, C, D, E) which means that based on the different measurements from the sensors the algorithm can tell in what way the exercise has been executed.
+
+Finally, a ROC curve has been built for each of the exercise execution manners. The area under the curve (AUC) for each of the outcomes is provided in the table below.
+
+``````{r, echo=FALSE, message=FALSE, warning=FALSE, comment=NA}
+
+# building ROC curves for each type of exercise execution
+parRF.fit.test.prob <- predict(parRF.fit,test.data[,2:53], type="prob")
+parRF.fit.test.ROC.A <- roc(as.factor(test.data$classe == "A"), parRF.fit.test.prob[, "A"])
+parRF.fit.test.ROC.B <- roc(as.factor(test.data$classe == "B"), parRF.fit.test.prob[, "B"])
+parRF.fit.test.ROC.C <- roc(as.factor(test.data$classe == "C"), parRF.fit.test.prob[, "C"])
+parRF.fit.test.ROC.D <- roc(as.factor(test.data$classe == "D"), parRF.fit.test.prob[, "D"])
+parRF.fit.test.ROC.E <- roc(as.factor(test.data$classe == "E"), parRF.fit.test.prob[, "E"])
+
+# building a table with the AUC statistics for each outcome
+
+AUC.classe <- data.frame(c(parRF.fit.test.ROC.A$auc, parRF.fit.test.ROC.B$auc, parRF.fit.test.ROC.C$auc, parRF.fit.test.ROC.D$auc, parRF.fit.test.ROC.E$auc))
+names(AUC.classe) <- c("AUC")
+rownames(AUC.classe) <- c("Class A:","Class B:","Class C:","Class D:","Class E:")
+
+AUC.classe
+
+```
+## Conclusion
+
+The statistics are very convincing implying that the model should provide accurate predictions as long as it is used for prediction of exercise mistake classification on the basis of sensor measurements for the initial six participants in the experiment. Unfortunately such great accuracy statistics probably imply that the model has been overfit with respect to sensor measurements accomplished on specifically those six participants in the experiment. Further testing on out-of-sample sensor measurement data produced from different participants in the experiment is desirable (not among the goals of this project).
+
